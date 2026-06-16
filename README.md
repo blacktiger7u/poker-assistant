@@ -29,17 +29,9 @@ Libraries used in a project:
 
 ## 📦 How to install
 
-1. Open terminal and install required dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-2. Run the application
-
-```bash
-python main.py
-```
+1. Go to the **[Releases](https://github.com/blacktiger7u/poker-assistant/releases)** section.
+2. Download the latest `poker_assistant.exe` file.
+3. Open file to launch the application instantly.
 
 
 
