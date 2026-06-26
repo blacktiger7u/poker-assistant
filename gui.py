@@ -4,8 +4,10 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QPushButton, QLabel,
     QGroupBox, QLineEdit, QTextEdit, QComboBox, QTabWidget, QFrame, QButtonGroup
 )
-from PyQt6.QtGui import QShortcut, QKeySequence
-from PyQt6.QtCore import Qt, pyqtSignal, QThread, QTimer
+from PyQt6.QtGui import (
+    QShortcut, QKeySequence, QPainter, QColor, QPen, QFont, QPainterPath
+)
+from PyQt6.QtCore import Qt, QRectF, pyqtSignal, QThread, QTimer
 
 from core.utils import RANKS, determine_street
 from core.hand_evaluator import HandEvaluator
@@ -17,187 +19,164 @@ from core.decision_engine import DecisionEngine
 from core.settings_store import load_settings, save_settings
 
 
-# ============================ MOTYW (PREMIUM DARK) ============================
-COLORS = {
-    "bg": "#0E1014",
-    "panel": "#171A21",
-    "panel_alt": "#1E222B",
-    "input": "#202531",
-    "border": "#2A2F3A",
-    "text": "#E6E9EF",
-    "muted": "#8B94A5",
-    "accent": "#2EE6A6",     # szmaragd – akcent główny
-    "accent_dk": "#1FB888",
-    "gold": "#E8B23A",       # premium / nagłówki
-    "danger": "#FF5C6C",
+# ============================ MOTYW (CASINO NOIR) ============================
+# Grafit + brass(złoto) jako kolor interakcji/brandu; zieleń/czerwień = dane.
+C = {
+    "bg": "#101319",
+    "panel": "#171B22",
+    "panel_alt": "#1E232C",
+    "input": "#1F2530",
+    "border": "#2A3039",
+    "border_lt": "#3A424F",
+    "text": "#E8EAEF",
+    "muted": "#7E879A",
+    "gold": "#D4A33C",       # akcent / interakcja / brand
+    "gold_dk": "#B8862A",
+    "green": "#3FB57A",      # pozytywne / win
+    "red": "#E25563",        # negatywne / lose
+    "felt": "#16382B",       # zielony filc (subtelne tło sceny kart)
 }
 
-# 4-kolorowa talia (czytelność na ciemnym tle)
 SUIT_SYMBOLS = {"s": "♠", "h": "♥", "d": "♦", "c": "♣"}
-SUIT_COLORS = {
-    "s": "#E8EAF0",  # pik   – jasny (zamiast czarnego, widoczny na ciemnym tle)
-    "h": "#FF5C6C",  # kier  – czerwony
-    "d": "#4DA3FF",  # karo  – niebieski
-    "c": "#3FD07F",  # trefl – zielony
+# Klasyczna 4-kolorowa talia NA BIAŁEJ karcie (maksymalna czytelność)
+SUIT_ON_WHITE = {
+    "s": "#1C1C1C",  # pik   – czarny
+    "h": "#D2342B",  # kier  – czerwony
+    "d": "#2E6FD6",  # karo  – niebieski
+    "c": "#2C8A4A",  # trefl – zielony
 }
 
-# Kolejność slotów: 2x Hero + 5x Board
-SLOT_LABELS = ["HERO 1", "HERO 2", "FLOP", "FLOP", "FLOP", "TURN", "RIVER"]
+SLOT_LABELS = ["HERO", "HERO", "FLOP", "FLOP", "FLOP", "TURN", "RIVER"]
 
-QSS = f"""
-QWidget {{
-    background-color: {COLORS['bg']};
-    color: {COLORS['text']};
-    font-family: 'Segoe UI', Arial, sans-serif;
-    font-size: 13px;
-}}
-QGroupBox {{
-    background-color: {COLORS['panel']};
-    border: 1px solid {COLORS['border']};
-    border-radius: 12px;
-    margin-top: 14px;
-    padding: 14px 12px 12px 12px;
-    font-weight: 600;
-}}
-QGroupBox::title {{
-    subcontrol-origin: margin;
-    subcontrol-position: top left;
-    left: 14px;
-    padding: 2px 8px;
-    color: {COLORS['muted']};
-    text-transform: uppercase;
-    letter-spacing: 1px;
-    font-size: 11px;
-}}
-QLabel {{ background: transparent; }}
 
-QComboBox, QLineEdit {{
-    background-color: {COLORS['input']};
-    border: 1px solid {COLORS['border']};
-    border-radius: 8px;
-    padding: 7px 10px;
-    selection-background-color: {COLORS['accent']};
-}}
-QComboBox:hover, QLineEdit:hover {{ border: 1px solid #3A4150; }}
-QComboBox:focus, QLineEdit:focus {{ border: 1px solid {COLORS['accent']}; }}
-QComboBox::drop-down {{ border: none; width: 22px; }}
-QComboBox QAbstractItemView {{
-    background-color: {COLORS['panel_alt']};
-    border: 1px solid {COLORS['border']};
-    selection-background-color: {COLORS['accent_dk']};
-    outline: none;
-}}
+# ------------------------------- Malowana karta -----------------------------
+class CardFace(QWidget):
+    """Realistyczna karta rysowana QPainterem (matryca i sloty stołu)."""
 
-/* --- Karty w matrycy --- */
-QPushButton#cardChip {{
-    background-color: {COLORS['panel_alt']};
-    border: 1px solid {COLORS['border']};
-    border-radius: 8px;
-    font-size: 18px;
-    font-weight: 700;
-    padding: 0px;
-}}
-QPushButton#cardChip:hover {{
-    background-color: #2A303D;
-    border: 1px solid {COLORS['accent']};
-}}
-QPushButton#cardChip:disabled {{
-    background-color: #12151B;
-    border: 1px solid #1B1F27;
-    color: #353A45;
-}}
-QPushButton#cardChip[suit="s"] {{ color: {SUIT_COLORS['s']}; }}
-QPushButton#cardChip[suit="h"] {{ color: {SUIT_COLORS['h']}; }}
-QPushButton#cardChip[suit="d"] {{ color: {SUIT_COLORS['d']}; }}
-QPushButton#cardChip[suit="c"] {{ color: {SUIT_COLORS['c']}; }}
+    clicked = pyqtSignal()
 
-/* --- Przyciski akcji --- */
-QPushButton#btnPrimary {{
-    background-color: {COLORS['accent']};
-    color: #06231A;
-    border: none;
-    border-radius: 9px;
-    padding: 10px 16px;
-    font-weight: 700;
-}}
-QPushButton#btnPrimary:hover {{ background-color: {COLORS['accent_dk']}; }}
-QPushButton#btnGhost {{
-    background-color: transparent;
-    color: {COLORS['text']};
-    border: 1px solid {COLORS['border']};
-    border-radius: 9px;
-    padding: 9px 14px;
-    font-weight: 600;
-}}
-QPushButton#btnGhost:hover {{ border: 1px solid {COLORS['accent']}; color: {COLORS['accent']}; }}
-QPushButton#btnDanger {{
-    background-color: transparent;
-    color: {COLORS['danger']};
-    border: 1px solid #4A2A30;
-    border-radius: 9px;
-    padding: 9px 14px;
-    font-weight: 600;
-}}
-QPushButton#btnDanger:hover {{ background-color: #2A1A1D; border: 1px solid {COLORS['danger']}; }}
+    def __init__(self, w, h, placeholder="", mini=False, fixed_card=None):
+        super().__init__()
+        self.setFixedSize(w, h)
+        self.card = fixed_card
+        self.placeholder = placeholder
+        self.mini = mini
+        self.used = False
+        self.active = False
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
-/* --- Przełącznik segmentowy Cash/MTT --- */
-QPushButton#seg {{
-    background-color: {COLORS['panel_alt']};
-    border: 1px solid {COLORS['border']};
-    border-radius: 9px;
-    padding: 9px 18px;
-    font-weight: 700;
-    color: {COLORS['muted']};
-}}
-QPushButton#seg:checked {{
-    background-color: {COLORS['accent']};
-    color: #06231A;
-    border: 1px solid {COLORS['accent']};
-}}
+    def update_state(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+        self.update()
 
-/* --- Faworyty (chipy stawek) --- */
-QPushButton#fav {{
-    background-color: {COLORS['panel_alt']};
-    border: 1px solid #3A4150;
-    border-radius: 14px;
-    padding: 5px 12px;
-    color: {COLORS['gold']};
-    font-weight: 700;
-}}
-QPushButton#fav:hover {{ border: 1px solid {COLORS['danger']}; color: {COLORS['danger']}; }}
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.isEnabled():
+            self.clicked.emit()
 
-QTabWidget::pane {{
-    border: 1px solid {COLORS['border']};
-    border-radius: 12px;
-    top: -1px;
-}}
-QTabBar::tab {{
-    background: transparent;
-    color: {COLORS['muted']};
-    padding: 10px 22px;
-    margin-right: 4px;
-    border-top-left-radius: 9px;
-    border-top-right-radius: 9px;
-    font-weight: 600;
-}}
-QTabBar::tab:selected {{
-    background: {COLORS['panel']};
-    color: {COLORS['text']};
-    border: 1px solid {COLORS['border']};
-    border-bottom: 2px solid {COLORS['accent']};
-}}
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(1.5, 1.5, self.width() - 3, self.height() - 3)
+        radius = 6 if self.mini else 9
 
-QTextEdit {{
-    background-color: #0A0C10;
-    border: 1px solid {COLORS['border']};
-    border-radius: 10px;
-    font-family: 'Cascadia Code', Consolas, monospace;
-    font-size: 14px;
-}}
-QScrollBar:vertical {{ background: {COLORS['bg']}; width: 10px; margin: 0; }}
-QScrollBar::handle:vertical {{ background: #313845; border-radius: 5px; min-height: 24px; }}
-QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
-"""
+        # --- pusty slot ---
+        if not self.card:
+            pen = QPen(QColor(C["gold"] if self.active else C["border_lt"]))
+            pen.setWidth(2)
+            pen.setStyle(Qt.PenStyle.SolidLine if self.active else Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            p.setBrush(QColor(C["felt"] if self.active else "#13161C"))
+            p.drawRoundedRect(rect, radius, radius)
+            if self.placeholder:
+                p.setPen(QColor(C["gold"] if self.active else "#566072"))
+                f = QFont("Segoe UI", 8)
+                f.setBold(True)
+                f.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1.0)
+                p.setFont(f)
+                p.drawText(rect, Qt.AlignmentFlag.AlignCenter, self.placeholder)
+            p.end()
+            return
+
+        suit = self.card[1]
+        rank = "10" if self.card[0] == "T" else self.card[0]
+        sym = SUIT_SYMBOLS[suit]
+
+        if self.used:  # karta zajęta w innym slocie – wyszarzona
+            face, ink, border = QColor("#2A2F38"), QColor("#5A6373"), QColor(C["border"])
+        else:
+            face, ink = QColor("#F5F2EA"), QColor(SUIT_ON_WHITE[suit])
+            border = QColor(C["gold"]) if self.active else QColor("#0B0D11")
+
+        p.setBrush(face)
+        bp = QPen(border)
+        bp.setWidth(2 if self.active else 1)
+        p.setPen(bp)
+        p.drawRoundedRect(rect, radius, radius)
+
+        p.setPen(ink)
+        idx = QFont("Segoe UI", 9 if self.mini else 12, QFont.Weight.Bold)
+        p.setFont(idx)
+        p.drawText(QRectF(rect.left() + 4, rect.top() + 2, rect.width(), 18),
+                   int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop), rank)
+
+        pip = QFont("Segoe UI", 18 if self.mini else 28, QFont.Weight.Bold)
+        p.setFont(pip)
+        p.drawText(rect, Qt.AlignmentFlag.AlignCenter, sym)
+
+        if not self.mini:  # drugi indeks (obrócony) jak na prawdziwej karcie
+            p.save()
+            p.translate(rect.right() - 4, rect.bottom() - 2)
+            p.rotate(180)
+            p.setFont(idx)
+            p.drawText(QRectF(0, 0, 30, 18),
+                       int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop), rank)
+            p.restore()
+        p.end()
+
+
+# ------------------------------- Pasek equity -------------------------------
+class EquityBar(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setFixedHeight(38)
+        self.win = self.tie = self.lose = 0.0
+
+    def set_values(self, win, tie, lose):
+        self.win, self.tie, self.lose = win, tie, lose
+        self.update()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(0, 0, self.width(), self.height())
+        path = QPainterPath()
+        path.addRoundedRect(rect, 9, 9)
+        p.setClipPath(path)
+        p.fillRect(rect, QColor("#13161C"))
+
+        total = self.win + self.tie + self.lose
+        if total <= 0:
+            p.setPen(QColor(C["muted"]))
+            p.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+            p.drawText(rect, Qt.AlignmentFlag.AlignCenter, "EQUITY —")
+            p.end()
+            return
+
+        x = 0.0
+        segs = [(self.win, QColor(C["green"]), "WIN"),
+                (self.tie, QColor(C["gold"]), "TIE"),
+                (self.lose, QColor(C["red"]), "LOSE")]
+        p.setFont(QFont("Segoe UI", 9, QFont.Weight.Bold))
+        for val, col, name in segs:
+            seg_w = self.width() * (val / total)
+            seg = QRectF(x, 0, seg_w, self.height())
+            p.fillRect(seg, col)
+            if seg_w > 56:
+                p.setPen(QColor("#0B0D11"))
+                p.drawText(seg, Qt.AlignmentFlag.AlignCenter, f"{name} {val:.0f}%")
+            x += seg_w
+        p.end()
 
 
 class SimulationWorker(QThread):
@@ -217,25 +196,152 @@ class SimulationWorker(QThread):
             self.result_ready.emit({"error": str(e)})
 
 
+QSS = f"""
+QWidget {{
+    background-color: {C['bg']};
+    color: {C['text']};
+    font-family: 'Segoe UI', Arial, sans-serif;
+    font-size: 13px;
+}}
+QGroupBox {{
+    background-color: {C['panel']};
+    border: 1px solid {C['border']};
+    border-radius: 12px;
+    margin-top: 16px;
+    padding: 16px 14px 14px 14px;
+    font-weight: 600;
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 16px;
+    padding: 2px 8px;
+    color: {C['muted']};
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    font-size: 10px;
+}}
+QLabel {{ background: transparent; }}
+
+QComboBox, QLineEdit {{
+    background-color: {C['input']};
+    border: 1px solid {C['border']};
+    border-radius: 8px;
+    padding: 7px 10px;
+    selection-background-color: {C['gold']};
+    selection-color: #14110A;
+}}
+QComboBox:hover, QLineEdit:hover {{ border: 1px solid {C['border_lt']}; }}
+QComboBox:focus, QLineEdit:focus {{ border: 1px solid {C['gold']}; }}
+QComboBox::drop-down {{ border: none; width: 22px; }}
+QComboBox QAbstractItemView {{
+    background-color: {C['panel_alt']};
+    border: 1px solid {C['border']};
+    selection-background-color: {C['gold_dk']};
+    selection-color: #14110A;
+    outline: none;
+}}
+
+QPushButton#btnPrimary {{
+    background-color: {C['gold']};
+    color: #14110A;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 16px;
+    font-weight: 700;
+}}
+QPushButton#btnPrimary:hover {{ background-color: {C['gold_dk']}; }}
+QPushButton#btnGhost {{
+    background-color: transparent;
+    color: {C['text']};
+    border: 1px solid {C['border_lt']};
+    border-radius: 8px;
+    padding: 9px 14px;
+    font-weight: 600;
+}}
+QPushButton#btnGhost:hover {{ border: 1px solid {C['gold']}; color: {C['gold']}; }}
+QPushButton#btnDanger {{
+    background-color: transparent;
+    color: {C['red']};
+    border: 1px solid #46303A;
+    border-radius: 8px;
+    padding: 9px 14px;
+    font-weight: 600;
+}}
+QPushButton#btnDanger:hover {{ background-color: #281A1E; border: 1px solid {C['red']}; }}
+
+QPushButton#seg {{
+    background-color: {C['panel_alt']};
+    border: 1px solid {C['border']};
+    border-radius: 8px;
+    padding: 9px 20px;
+    font-weight: 700;
+    color: {C['muted']};
+    letter-spacing: 1px;
+}}
+QPushButton#seg:checked {{
+    background-color: {C['gold']};
+    color: #14110A;
+    border: 1px solid {C['gold']};
+}}
+
+QPushButton#fav {{
+    background-color: {C['panel_alt']};
+    border: 1px solid {C['border_lt']};
+    border-radius: 13px;
+    padding: 5px 12px;
+    color: {C['gold']};
+    font-weight: 700;
+}}
+QPushButton#fav:hover {{ border: 1px solid {C['red']}; color: {C['red']}; }}
+
+QTabWidget::pane {{ border: 1px solid {C['border']}; border-radius: 12px; top: -1px; }}
+QTabBar::tab {{
+    background: transparent;
+    color: {C['muted']};
+    padding: 10px 24px;
+    margin-right: 4px;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}}
+QTabBar::tab:selected {{
+    background: {C['panel']};
+    color: {C['text']};
+    border: 1px solid {C['border']};
+    border-bottom: 2px solid {C['gold']};
+}}
+
+QTextEdit {{
+    background-color: #0B0D12;
+    border: 1px solid {C['border']};
+    border-radius: 10px;
+    font-family: 'Cascadia Code', Consolas, monospace;
+    font-size: 13px;
+}}
+QScrollBar:vertical {{ background: {C['bg']}; width: 10px; margin: 0; }}
+QScrollBar::handle:vertical {{ background: #313845; border-radius: 5px; min-height: 24px; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
+"""
+
+
 class PokerAssistantGUI(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Poker Assistant — PRO")
-        self.resize(1320, 860)
+        self.resize(1340, 880)
         self.setStyleSheet(QSS)
 
-        # Stan kart: stałe sloty (None = pusty), aktywny slot = miejsce kolejnej karty
         self.hero = [None, None]
         self.board = [None, None, None, None, None]
         self.active = 0
 
-        # Ustawienia trwałe
         self.settings = load_settings()
         self.game_mode = self.settings.get("mode", "CASH")
         self.favorites = list(self.settings.get("favorite_stakes", []))
         self.sessions = list(self.settings.get("sessions", []))
 
-        # Moduły logiki
         self.evaluator = HandEvaluator()
         self.pot_odds_calc = PotOddsCalculator()
         self.equity_calc = EquityCalculator()
@@ -248,8 +354,8 @@ class PokerAssistantGUI(QWidget):
         self.analyze_timer.setSingleShot(True)
         self.analyze_timer.timeout.connect(self.run_analysis_logic)
 
-        self.card_chips = {}
-        self.slot_buttons = []
+        self.card_faces = {}
+        self.slot_faces = []
         self.fav_buttons = []
 
         self.init_ui()
@@ -260,42 +366,63 @@ class PokerAssistantGUI(QWidget):
     # ------------------------------------------------------------------ UI
     def init_ui(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(14, 12, 14, 12)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(10)
         root.addWidget(self.create_header())
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self.create_analyzer_tab(), "  Analizator  ")
-        self.tabs.addTab(self.create_bankroll_tab(), "  Bankroll  ")
+        self.tabs.addTab(self.create_analyzer_tab(), "  ANALIZATOR  ")
+        self.tabs.addTab(self.create_bankroll_tab(), "  BANKROLL  ")
         root.addWidget(self.tabs)
 
     def create_header(self) -> QWidget:
-        bar = QWidget()
-        lay = QHBoxLayout(bar)
-        lay.setContentsMargins(4, 0, 4, 0)
+        wrap = QWidget()
+        v = QVBoxLayout(wrap)
+        v.setContentsMargins(2, 0, 2, 0)
+        v.setSpacing(8)
 
-        title = QLabel("♠ POKER ASSISTANT")
-        title.setStyleSheet(
-            f"font-size: 20px; font-weight: 800; color: {COLORS['text']}; letter-spacing: 1px;"
+        row = QHBoxLayout()
+        accent = QFrame()
+        accent.setFixedSize(5, 26)
+        accent.setStyleSheet(f"background-color: {C['gold']}; border-radius: 2px;")
+        title = QLabel("POKER ASSISTANT")
+        title.setStyleSheet(f"font-size: 19px; font-weight: 800; letter-spacing: 3px; color: {C['text']};")
+        pro = QLabel("PRO")
+        pro.setStyleSheet(
+            f"color: {C['gold']}; font-weight: 800; font-size: 11px; letter-spacing: 2px; "
+            f"border: 1px solid {C['gold_dk']}; border-radius: 4px; padding: 1px 6px;"
         )
-        sub = QLabel("PRO Analytics Engine")
-        sub.setStyleSheet(f"color: {COLORS['gold']}; font-weight: 700; font-size: 12px;")
+        self.mode_badge = QLabel(self.game_mode)
+        self.mode_badge.setStyleSheet(
+            f"color: {C['muted']}; font-weight: 700; font-size: 11px; letter-spacing: 1px;"
+        )
+        row.addWidget(accent)
+        row.addSpacing(8)
+        row.addWidget(title)
+        row.addSpacing(8)
+        row.addWidget(pro)
+        row.addStretch()
+        row.addWidget(self.mode_badge)
+        row.addSpacing(14)
+        hint = QLabel("Backspace cofnij  ·  Delete reset board  ·  Esc wyczyść")
+        hint.setStyleSheet(f"color: {C['muted']}; font-size: 11px;")
+        row.addWidget(hint)
+        v.addLayout(row)
 
-        lay.addWidget(title)
-        lay.addSpacing(10)
-        lay.addWidget(sub)
-        lay.addStretch()
-
-        hint = QLabel("Skróty:  Backspace = cofnij  ·  Delete = wyczyść board  ·  Esc = wyczyść wszystko")
-        hint.setStyleSheet(f"color: {COLORS['muted']}; font-size: 11px;")
-        lay.addWidget(hint)
-        return bar
+        rule = QFrame()
+        rule.setFixedHeight(1)
+        rule.setStyleSheet(f"background-color: {C['border']};")
+        v.addWidget(rule)
+        return wrap
 
     # ---------------------------------------------------------- Analyzer tab
     def create_analyzer_tab(self) -> QWidget:
         tab = QWidget()
         main = QHBoxLayout(tab)
+        main.setSpacing(12)
 
         left = QVBoxLayout()
+        left.setSpacing(10)
         left.addWidget(self.create_top_controls())
         left.addWidget(self.create_board_view())
         left.addWidget(self.create_card_matrix())
@@ -303,6 +430,7 @@ class PokerAssistantGUI(QWidget):
         left.addStretch()
 
         right = QVBoxLayout()
+        right.setSpacing(10)
         right.addWidget(self.create_dashboard_view())
 
         main.addLayout(left, 6)
@@ -329,7 +457,7 @@ class PokerAssistantGUI(QWidget):
         self.cb_sims.currentIndexChanged.connect(self.on_sims_changed)
 
         self.lbl_warning = QLabel("")
-        self.lbl_warning.setStyleSheet(f"color: {COLORS['gold']}; font-weight: bold;")
+        self.lbl_warning.setStyleSheet(f"color: {C['gold']}; font-weight: bold;")
 
         layout.addWidget(self._field("Pozycja", self.cb_position))
         layout.addWidget(self._field("Gracze", self.cb_players))
@@ -345,8 +473,8 @@ class PokerAssistantGUI(QWidget):
         v = QVBoxLayout(box)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(4)
-        cap = QLabel(label)
-        cap.setStyleSheet(f"color: {COLORS['muted']}; font-size: 11px;")
+        cap = QLabel(label.upper())
+        cap.setStyleSheet(f"color: {C['muted']}; font-size: 10px; letter-spacing: 1px;")
         v.addWidget(cap)
         v.addWidget(widget)
         return box
@@ -356,72 +484,73 @@ class PokerAssistantGUI(QWidget):
         outer = QVBoxLayout()
 
         row = QHBoxLayout()
+        row.setSpacing(8)
 
         hero_box = QVBoxLayout()
         hero_cap = QLabel("HERO")
-        hero_cap.setStyleSheet(f"color: {COLORS['accent']}; font-weight: 700; font-size: 11px;")
+        hero_cap.setStyleSheet(f"color: {C['gold']}; font-weight: 800; font-size: 10px; letter-spacing: 2px;")
         hero_box.addWidget(hero_cap)
         hero_cards = QHBoxLayout()
+        hero_cards.setSpacing(8)
         for i in range(2):
             hero_cards.addWidget(self._make_slot(i))
+        hero_cards.addStretch()
         hero_box.addLayout(hero_cards)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.VLine)
-        sep.setStyleSheet(f"color: {COLORS['border']};")
+        sep.setStyleSheet(f"color: {C['border']};")
 
         board_box = QVBoxLayout()
         board_cap = QLabel("BOARD")
-        board_cap.setStyleSheet(f"color: {COLORS['muted']}; font-weight: 700; font-size: 11px;")
+        board_cap.setStyleSheet(f"color: {C['muted']}; font-weight: 800; font-size: 10px; letter-spacing: 2px;")
         board_box.addWidget(board_cap)
         board_cards = QHBoxLayout()
+        board_cards.setSpacing(8)
         for i in range(2, 7):
             board_cards.addWidget(self._make_slot(i))
+        board_cards.addStretch()
         board_box.addLayout(board_cards)
 
         row.addLayout(hero_box)
-        row.addSpacing(14)
+        row.addSpacing(10)
         row.addWidget(sep)
-        row.addSpacing(14)
-        row.addLayout(board_box)
-        row.addStretch()
+        row.addSpacing(10)
+        row.addLayout(board_box, 1)
         outer.addLayout(row)
 
-        # Pasek statusu + szybkie akcje
         actions = QHBoxLayout()
+        nxt_cap = QLabel("NASTĘPNA")
+        nxt_cap.setStyleSheet(f"color: {C['muted']}; font-size: 10px; letter-spacing: 1px;")
         self.lbl_next = QLabel("")
-        self.lbl_next.setStyleSheet(f"color: {COLORS['accent']}; font-weight: 700;")
+        self.lbl_next.setStyleSheet(f"color: {C['gold']}; font-weight: 700;")
+        actions.addWidget(nxt_cap)
+        actions.addSpacing(6)
         actions.addWidget(self.lbl_next)
         actions.addStretch()
 
-        btn_undo = QPushButton("⌫  Cofnij kartę")
+        btn_undo = QPushButton("Cofnij kartę")
         btn_undo.setObjectName("btnGhost")
         btn_undo.clicked.connect(self.undo_last)
-
-        btn_reset = QPushButton("↺  Reset Board")
+        btn_reset = QPushButton("Reset Board")
         btn_reset.setObjectName("btnGhost")
         btn_reset.clicked.connect(self.reset_board)
-
         btn_clear = QPushButton("Wyczyść wszystko")
         btn_clear.setObjectName("btnDanger")
         btn_clear.clicked.connect(self.clear_all)
+        for b in (btn_undo, btn_reset, btn_clear):
+            actions.addWidget(b)
 
-        actions.addWidget(btn_undo)
-        actions.addWidget(btn_reset)
-        actions.addWidget(btn_clear)
         outer.addSpacing(8)
         outer.addLayout(actions)
-
         group.setLayout(outer)
         return group
 
-    def _make_slot(self, idx: int) -> QPushButton:
-        btn = QPushButton()
-        btn.setFixedSize(70, 96)
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.clicked.connect(lambda _, i=idx: self.on_slot_clicked(i))
-        self.slot_buttons.append(btn)
-        return btn
+    def _make_slot(self, idx: int) -> CardFace:
+        face = CardFace(66, 92, placeholder=SLOT_LABELS[idx])
+        face.clicked.connect(lambda i=idx: self.on_slot_clicked(i))
+        self.slot_faces.append(face)
+        return face
 
     def create_card_matrix(self) -> QGroupBox:
         group = QGroupBox("Wybór kart — kliknij, by dodać do aktywnego slotu")
@@ -429,32 +558,23 @@ class PokerAssistantGUI(QWidget):
         grid.setSpacing(5)
 
         display_ranks = list(reversed(RANKS))  # A K Q J T 9 ... 2
-
-        # Nagłówek z rangami
         for col, rank in enumerate(display_ranks, start=1):
-            head = QLabel(rank)
+            head = QLabel("10" if rank == "T" else rank)
             head.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            head.setStyleSheet(f"color: {COLORS['muted']}; font-weight: 700;")
+            head.setStyleSheet(f"color: {C['muted']}; font-weight: 700; font-size: 11px;")
             grid.addWidget(head, 0, col)
 
-        # Wiersze kolorów
-        suit_order = ["s", "h", "d", "c"]
-        for r, suit in enumerate(suit_order, start=1):
+        for r, suit in enumerate(["s", "h", "d", "c"], start=1):
             sym = QLabel(SUIT_SYMBOLS[suit])
             sym.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            sym.setStyleSheet(f"color: {SUIT_COLORS[suit]}; font-size: 18px; font-weight: 700;")
+            sym.setStyleSheet(f"color: {SUIT_ON_WHITE[suit]}; font-size: 17px; font-weight: 700;")
             grid.addWidget(sym, r, 0)
-
             for col, rank in enumerate(display_ranks, start=1):
                 card = f"{rank}{suit}"
-                chip = QPushButton(f"{rank}{SUIT_SYMBOLS[suit]}")
-                chip.setObjectName("cardChip")
-                chip.setProperty("suit", suit)
-                chip.setFixedSize(54, 46)
-                chip.setCursor(Qt.CursorShape.PointingHandCursor)
-                chip.clicked.connect(lambda _, c=card: self.on_chip_clicked(c))
-                grid.addWidget(chip, r, col)
-                self.card_chips[card] = chip
+                face = CardFace(48, 64, mini=True, fixed_card=card)
+                face.clicked.connect(lambda c=card: self.on_chip_clicked(c))
+                grid.addWidget(face, r, col)
+                self.card_faces[card] = face
 
         group.setLayout(grid)
         return group
@@ -469,40 +589,60 @@ class PokerAssistantGUI(QWidget):
         for field in (self.in_pot, self.in_call, self.in_stack):
             field.textChanged.connect(self.trigger_analysis)
 
-        layout.addWidget(QLabel("Wielkość puli ($)"), 0, 0)
-        layout.addWidget(self.in_pot, 0, 1)
-        layout.addWidget(QLabel("Do dorównania ($)"), 0, 2)
-        layout.addWidget(self.in_call, 0, 3)
-        layout.addWidget(QLabel("Efektywny stack ($)"), 0, 4)
-        layout.addWidget(self.in_stack, 0, 5)
-
+        layout.addWidget(self._field("Wielkość puli ($)", self.in_pot), 0, 0)
+        layout.addWidget(self._field("Do dorównania ($)", self.in_call), 0, 1)
+        layout.addWidget(self._field("Efektywny stack ($)", self.in_stack), 0, 2)
         group.setLayout(layout)
         return group
 
     def create_dashboard_view(self) -> QGroupBox:
         group = QGroupBox("Analiza i rekomendacja")
         layout = QVBoxLayout()
+        layout.setSpacing(10)
+
+        self.action_banner = QLabel("CZEKAM NA KARTY")
+        self.action_banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._style_banner("muted", "CZEKAM NA KARTY", "")
+        layout.addWidget(self.action_banner)
+
+        self.equity_bar = EquityBar()
+        layout.addWidget(self.equity_bar)
+
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
         self.log_area.setStyleSheet(
-            f"background-color: #0A0C10; color: {COLORS['text']}; "
-            "font-family: 'Cascadia Code', Consolas, monospace; font-size: 14px;"
+            f"background-color: #0B0D12; color: {C['text']}; "
+            "font-family: 'Cascadia Code', Consolas, monospace; font-size: 13px;"
         )
         layout.addWidget(self.log_area)
         group.setLayout(layout)
         return group
 
+    def _style_banner(self, kind: str, action: str, sub: str):
+        colors = {"green": C["green"], "gold": C["gold"], "red": C["red"], "muted": C["muted"]}
+        col = colors.get(kind, C["muted"])
+        text = action if not sub else f"{action}   ·   {sub}"
+        self.action_banner.setText(text)
+        self.action_banner.setStyleSheet(
+            f"color: {col}; background-color: {C['panel_alt']}; "
+            f"border: 1px solid {col}; border-radius: 10px; padding: 12px; "
+            f"font-size: 18px; font-weight: 800; letter-spacing: 1px;"
+        )
+
     # ---------------------------------------------------------- Bankroll tab
     def create_bankroll_tab(self) -> QWidget:
         tab = QWidget()
         main = QHBoxLayout(tab)
+        main.setSpacing(12)
 
         left = QVBoxLayout()
+        left.setSpacing(10)
         left.addWidget(self.create_bankroll_input())
         left.addWidget(self.create_session_entry())
         left.addStretch()
 
         right = QVBoxLayout()
+        right.setSpacing(10)
         right.addWidget(self.create_suggestion_panel())
         right.addWidget(self.create_history_panel())
         right.addStretch()
@@ -515,7 +655,6 @@ class PokerAssistantGUI(QWidget):
         group = QGroupBox("Kapitał i tryb gry")
         layout = QVBoxLayout()
 
-        # Segment Cash / MTT
         seg_row = QHBoxLayout()
         self.btn_cash = QPushButton("CASH")
         self.btn_mtt = QPushButton("MTT")
@@ -531,14 +670,13 @@ class PokerAssistantGUI(QWidget):
         (self.btn_mtt if self.game_mode == "MTT" else self.btn_cash).setChecked(True)
         layout.addLayout(seg_row)
 
-        # Pole bankrolla (duże)
-        cap = QLabel("Aktualny bankroll ($)")
-        cap.setStyleSheet(f"color: {COLORS['muted']}; font-size: 12px;")
+        cap = QLabel("AKTUALNY BANKROLL ($)")
+        cap.setStyleSheet(f"color: {C['muted']}; font-size: 10px; letter-spacing: 1px;")
         self.in_bankroll = QLineEdit(self._fmt(self.settings.get("bankroll", 1000.0)))
         self.in_bankroll.setStyleSheet(
-            f"background-color: {COLORS['input']}; border: 1px solid {COLORS['border']}; "
+            f"background-color: {C['input']}; border: 1px solid {C['border']}; "
             f"border-radius: 10px; padding: 12px 14px; font-size: 26px; font-weight: 800; "
-            f"color: {COLORS['accent']};"
+            f"color: {C['gold']};"
         )
         self.in_bankroll.textChanged.connect(self.on_bankroll_changed)
         self.in_bankroll.editingFinished.connect(self.persist)
@@ -555,19 +693,19 @@ class PokerAssistantGUI(QWidget):
 
         row = QHBoxLayout()
         self.in_buyin = QLineEdit("")
-        self.in_buyin.setPlaceholderText("Buy-in ($) — opcjonalnie")
+        self.in_buyin.setPlaceholderText("np. 10")
         self.in_result = QLineEdit("")
-        self.in_result.setPlaceholderText("Wynik (+/−) $")
+        self.in_result.setPlaceholderText("np. +25  /  -15")
         self.in_result.returnPressed.connect(self.save_session)
-        row.addWidget(self._field("Buy-in", self.in_buyin))
-        row.addWidget(self._field("Wynik sesji", self.in_result))
+        row.addWidget(self._field("Buy-in ($)", self.in_buyin))
+        row.addWidget(self._field("Wynik sesji (+/−)", self.in_result))
         layout.addLayout(row)
 
         btn_row = QHBoxLayout()
-        btn_win = QPushButton("▲  Wygrana")
+        btn_win = QPushButton("Wygrana")
         btn_win.setObjectName("btnPrimary")
         btn_win.clicked.connect(lambda: self.quick_result(positive=True))
-        btn_loss = QPushButton("▼  Przegrana")
+        btn_loss = QPushButton("Przegrana")
         btn_loss.setObjectName("btnDanger")
         btn_loss.clicked.connect(lambda: self.quick_result(positive=False))
         btn_save = QPushButton("Zapisz")
@@ -588,36 +726,33 @@ class PokerAssistantGUI(QWidget):
         layout = QVBoxLayout()
 
         self.lbl_headline = QLabel("—")
-        self.lbl_headline.setStyleSheet(
-            f"font-size: 30px; font-weight: 800; color: {COLORS['accent']};"
-        )
+        self.lbl_headline.setStyleSheet(f"font-size: 30px; font-weight: 800; color: {C['gold']};")
         self.lbl_rule = QLabel("")
-        self.lbl_rule.setStyleSheet(f"color: {COLORS['muted']}; font-size: 12px;")
+        self.lbl_rule.setStyleSheet(f"color: {C['muted']}; font-size: 12px;")
         layout.addWidget(self.lbl_headline)
         layout.addWidget(self.lbl_rule)
         layout.addSpacing(8)
 
         tiers = QHBoxLayout()
-        self.lbl_aggro = self._tier_card("Agresywnie", COLORS["danger"])
-        self.lbl_standard = self._tier_card("Standard", COLORS["accent"])
-        self.lbl_nit = self._tier_card("Ostrożnie", COLORS["gold"])
+        self.lbl_aggro = self._tier_card("Agresywnie", C["red"])
+        self.lbl_standard = self._tier_card("Standard", C["green"])
+        self.lbl_nit = self._tier_card("Ostrożnie", C["gold"])
         for w in (self.lbl_aggro, self.lbl_standard, self.lbl_nit):
             tiers.addWidget(w["box"])
         layout.addLayout(tiers)
 
         self.lbl_next_target = QLabel("")
-        self.lbl_next_target.setStyleSheet(f"color: {COLORS['muted']}; font-size: 12px;")
+        self.lbl_next_target.setStyleSheet(f"color: {C['muted']}; font-size: 12px;")
         layout.addSpacing(6)
         layout.addWidget(self.lbl_next_target)
 
-        # Faworyci
-        fav_cap = QLabel("Ulubione stawki")
-        fav_cap.setStyleSheet(f"color: {COLORS['muted']}; font-size: 11px;")
+        fav_cap = QLabel("ULUBIONE STAWKI")
+        fav_cap.setStyleSheet(f"color: {C['muted']}; font-size: 10px; letter-spacing: 1px;")
         layout.addSpacing(10)
         layout.addWidget(fav_cap)
         self.fav_row = QHBoxLayout()
         self.fav_row.setSpacing(6)
-        btn_add_fav = QPushButton("★ Zapisz aktualną")
+        btn_add_fav = QPushButton("Dodaj do ulubionych")
         btn_add_fav.setObjectName("btnGhost")
         btn_add_fav.clicked.connect(self.add_favorite)
         self.fav_row.addWidget(btn_add_fav)
@@ -631,13 +766,12 @@ class PokerAssistantGUI(QWidget):
     def _tier_card(self, title: str, color: str) -> dict:
         box = QFrame()
         box.setStyleSheet(
-            f"background-color: {COLORS['panel_alt']}; border: 1px solid {COLORS['border']}; "
-            "border-radius: 10px;"
+            f"background-color: {C['panel_alt']}; border: 1px solid {C['border']}; border-radius: 10px;"
         )
         v = QVBoxLayout(box)
         v.setContentsMargins(12, 10, 12, 10)
-        cap = QLabel(title)
-        cap.setStyleSheet(f"color: {COLORS['muted']}; font-size: 11px; font-weight: 600;")
+        cap = QLabel(title.upper())
+        cap.setStyleSheet(f"color: {C['muted']}; font-size: 10px; font-weight: 700; letter-spacing: 1px;")
         val = QLabel("—")
         val.setStyleSheet(f"color: {color}; font-size: 18px; font-weight: 800;")
         v.addWidget(cap)
@@ -647,16 +781,13 @@ class PokerAssistantGUI(QWidget):
     def create_history_panel(self) -> QGroupBox:
         group = QGroupBox("Historia sesji")
         layout = QVBoxLayout()
-
         self.lbl_stats = QLabel("")
         self.lbl_stats.setStyleSheet("font-size: 14px; font-weight: 700;")
         layout.addWidget(self.lbl_stats)
-
         self.history_area = QTextEdit()
         self.history_area.setReadOnly(True)
-        self.history_area.setFixedHeight(180)
+        self.history_area.setFixedHeight(190)
         layout.addWidget(self.history_area)
-
         group.setLayout(layout)
         self.render_history()
         return group
@@ -702,7 +833,7 @@ class PokerAssistantGUI(QWidget):
 
     def on_slot_clicked(self, idx: int):
         if self._card_at(idx) is not None:
-            self._set_card_at(idx, None)  # klik w wypełniony slot = usuń kartę
+            self._set_card_at(idx, None)
         self.active = idx
         self.refresh_board()
         self.trigger_analysis()
@@ -729,35 +860,22 @@ class PokerAssistantGUI(QWidget):
         self.board = [None, None, None, None, None]
         self.active = 0
         self.log_area.clear()
+        self.equity_bar.set_values(0, 0, 0)
+        self._style_banner("muted", "CZEKAM NA KARTY", "")
         self.refresh_board()
 
     def refresh_board(self):
         used = self.used_cards()
-        for card, chip in self.card_chips.items():
-            chip.setEnabled(card not in used)
-        for i, btn in enumerate(self.slot_buttons):
-            self._style_slot(btn, self._card_at(i), i == self.active)
+        for card, face in self.card_faces.items():
+            is_used = card in used
+            face.update_state(used=is_used)
+            face.setEnabled(not is_used)
+        for i, face in enumerate(self.slot_faces):
+            face.update_state(card=self._card_at(i), active=(i == self.active))
         if self.active is None or self.active >= 7:
-            self.lbl_next.setText("✓  Komplet kart")
+            self.lbl_next.setText("komplet kart")
         else:
-            self.lbl_next.setText(f"▶  Następna karta → {SLOT_LABELS[self.active]}")
-
-    def _style_slot(self, btn: QPushButton, card, is_active: bool):
-        border = COLORS["accent"] if is_active else COLORS["border"]
-        if card:
-            color = SUIT_COLORS[card[1]]
-            btn.setText(f"{card[0]}{SUIT_SYMBOLS[card[1]]}")
-            btn.setStyleSheet(
-                f"background-color: {COLORS['panel_alt']}; border: 2px solid {border}; "
-                f"border-radius: 10px; color: {color}; font-size: 26px; font-weight: 800;"
-            )
-        else:
-            style = "dashed" if not is_active else "solid"
-            btn.setText("")
-            btn.setStyleSheet(
-                f"background-color: #14171D; border: 2px {style} {border}; "
-                f"border-radius: 10px; color: {COLORS['muted']};"
-            )
+            self.lbl_next.setText(SLOT_LABELS[self.active])
 
     # ----------------------------------------------------- Analiza (pipeline)
     def safe_float(self, text: str) -> float:
@@ -785,11 +903,14 @@ class PokerAssistantGUI(QWidget):
 
         if len(hero_list) < 2:
             self.log_area.clear()
-            self.log("♙  Wybierz 2 karty HERO, aby rozpocząć analizę.")
+            self.equity_bar.set_values(0, 0, 0)
+            self._style_banner("muted", "CZEKAM NA KARTY", "Wybierz 2 karty HERO")
+            self.log("Wybierz 2 karty HERO, aby rozpocząć analizę.")
             return
 
         if len(board_list) in (1, 2):
             self.log_area.clear()
+            self._style_banner("muted", "FLOP NIEKOMPLETNY", f"{len(board_list)}/3 kart")
             self.log(f"Wybrano {len(board_list)}/3 kart flopa. Uzupełnij flop...")
             return
 
@@ -822,6 +943,7 @@ class PokerAssistantGUI(QWidget):
         self.log(f"Ryzyko bankrolla:  {br_data['risk_level']}  ({br_data['engaged_pct']}% zaangażowane)")
 
         sims = int(self.cb_sims.currentText())
+        self._style_banner("gold", "LICZĘ...", f"{sims:,} symulacji")
         self.log(f"\nUruchamiam {sims:,} symulacji Monte Carlo...")
 
         self.analysis_data_cache = {
@@ -844,20 +966,36 @@ class PokerAssistantGUI(QWidget):
 
     def on_simulation_complete(self, mc_results: dict):
         if "error" in mc_results:
+            self._style_banner("red", "BŁĄD SYMULACJI", "")
             self.log(f"\n[!] BŁĄD SYMULACJI: {mc_results['error']}")
             return
 
-        self.log(f"\nMonte Carlo:  Win {mc_results['win']}%  ·  Tie {mc_results['tie']}%  ·  Lose {mc_results['lose']}%")
-        self.analysis_data_cache["equity"] = mc_results["win"]
-        decision = self.engine.get_recommendation(self.analysis_data_cache)
+        win, tie, lose = mc_results["win"], mc_results["tie"], mc_results["lose"]
+        self.equity_bar.set_values(win, tie, lose)
+        self.log(f"\nMonte Carlo:  Win {win}%  ·  Tie {tie}%  ·  Lose {lose}%")
 
-        self.log("\n▶▶▶  REKOMENDACJA  ◀◀◀")
+        self.analysis_data_cache["equity"] = win
+        decision = self.engine.get_recommendation(self.analysis_data_cache)
         action = decision.get("action", "—")
         conf = decision.get("confidence", 0.0)
-        self.log(f"   AKCJA:      {action}")
-        self.log(f"   Pewność:    {conf}%")
+
+        self._style_banner(self._action_kind(action), action, f"pewność {conf:.0f}%")
+        self.log("\n──  REKOMENDACJA  ──")
+        self.log(f"   Akcja:    {action}")
+        self.log(f"   Pewność:  {conf}%")
         for reason in decision.get("reason", []):
             self.log(f"   • {reason}")
+
+    @staticmethod
+    def _action_kind(action: str) -> str:
+        a = action.upper()
+        if "FOLD" in a:
+            return "red"
+        if "CALL" in a:
+            return "gold"
+        if any(k in a for k in ("RAISE", "BET", "ALL-IN", "3-BET", "VALUE")):
+            return "green"
+        return "muted"
 
     def log(self, text: str):
         self.log_area.append(text)
@@ -871,6 +1009,7 @@ class PokerAssistantGUI(QWidget):
 
     def set_mode(self, mode: str):
         self.game_mode = mode
+        self.mode_badge.setText(mode)
         self.update_bankroll_view()
         self.persist()
 
@@ -883,7 +1022,7 @@ class PokerAssistantGUI(QWidget):
         self.lbl_headline.setText(data["headline"])
         self.lbl_headline.setStyleSheet(
             f"font-size: 30px; font-weight: 800; "
-            f"color: {COLORS['accent'] if data['ok'] else COLORS['danger']};"
+            f"color: {C['gold'] if data['ok'] else C['red']};"
         )
         self.lbl_rule.setText("Zasada: " + data["rule"])
         self.lbl_aggro["val"].setText(data["aggressive"])
@@ -931,23 +1070,23 @@ class PokerAssistantGUI(QWidget):
     def render_history(self):
         total = sum(s["result"] for s in self.sessions)
         count = len(self.sessions)
-        color = COLORS["accent"] if total >= 0 else COLORS["danger"]
+        color = C["green"] if total >= 0 else C["red"]
         sign = "+" if total >= 0 else ""
         self.lbl_stats.setText(
-            f"<span style='color:{COLORS['muted']}'>Sesji: {count}   ·   Bilans: </span>"
+            f"<span style='color:{C['muted']}'>Sesji: {count}   ·   Bilans: </span>"
             f"<span style='color:{color}'>{sign}{total:.2f} $</span>"
         )
         lines = []
         for s in reversed(self.sessions[-12:]):
             r = s["result"]
-            c = SUIT_COLORS["c"] if r >= 0 else SUIT_COLORS["h"]
+            col = C["green"] if r >= 0 else C["red"]
             sign = "+" if r >= 0 else ""
             lines.append(
-                f"<span style='color:{COLORS['muted']}'>{s['ts']}  [{s.get('mode','')}]</span>  "
-                f"<span style='color:{c}; font-weight:700'>{sign}{r:.2f} $</span>"
+                f"<span style='color:{C['muted']}'>{s['ts']}  [{s.get('mode','')}]</span>  "
+                f"<span style='color:{col}; font-weight:700'>{sign}{r:.2f} $</span>"
             )
         self.history_area.setHtml("<br>".join(lines) if lines else
-                                  f"<span style='color:{COLORS['muted']}'>Brak zapisanych sesji.</span>")
+                                  f"<span style='color:{C['muted']}'>Brak zapisanych sesji.</span>")
 
     # --------------------------------------------------------- Faworyci
     def add_favorite(self):
